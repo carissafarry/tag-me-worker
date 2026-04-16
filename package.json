@@ -1,0 +1,20 @@
+{
+  "name": "tag-me-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "BullMQ notification worker",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "stop": "pkill -f 'node index.js' || true",
+    "test": "node --test src/tests/processor.test.js",
+    "test:manual": "node test.js",
+    "enqueue": "node enqueue.js",
+    "clean": "rm -rf node_modules package-lock.json"
+  },
+  "dependencies": {
+    "bullmq": "^5.0.0",
+    "ioredis": "^5.3.0"
+  }
+}
