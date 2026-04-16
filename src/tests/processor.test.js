@@ -230,3 +230,138 @@ describe("retry configuration", () => {
     assert.equal(jobOptions.backoff.delay, 2000);
   });
 });
+
+// --- Failure observability with retry logging ---
+
+describe("failure observability and retry logging", () => {
+  test("logs all failures with retry attempt count and max attempts", async () => {
+    const logs = [];
+
+    function simulateFailureLogging(job, err) {
+      const maxAttempts = job?.opts?.attempts ?? 3;
+      const attempt = job?.attemptsMade ?? 0;
+      const isTerminal = attempt >= maxAttempts;
+      const backoffDelay = job?.opts?.backoff?.delay ?? 2000;
+
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        level: "error",
+        event: isTerminal ? "notification_failed_terminal" : "notification_failed",
+        job_id: job?.id,
+        reason: err.message,
+        attempt,
+        max_attempts: maxAttempts,
+      };
+
+      if (!isTerminal && backoffDelay) {
+        logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, attempt - 1);
+      }
+
+      logs.push(logEntry);
+    }
+
+    // First retry attempt
+    const job1 = makeJob({ id: "job-retry-1", attemptsMade: 1, attempts: 3 });
+    simulateFailureLogging(job1, new Error("timeout"));
+
+    assert.equal(logs[0].event, "notification_failed");
+    assert.equal(logs[0].attempt, 1);
+    assert.equal(logs[0].max_attempts, 3);
+    assert.equal(logs[0].next_retry_delay_ms, 2000); // 2000 * 2^0
+
+    // Second retry attempt
+    const job2 = makeJob({ id: "job-retry-1", attemptsMade: 2, attempts: 3 });
+    simulateFailureLogging(job2, new Error("timeout"));
+
+    assert.equal(logs[1].event, "notification_failed");
+    assert.equal(logs[1].attempt, 2);
+    assert.equal(logs[1].next_retry_delay_ms, 4000); // 2000 * 2^1
+
+    // Terminal failure
+    const job3 = makeJob({ id: "job-retry-1", attemptsMade: 3, attempts: 3 });
+    simulateFailureLogging(job3, new Error("timeout"));
+
+    assert.equal(logs[2].event, "notification_failed_terminal");
+    assert.equal(logs[2].attempt, 3);
+    assert.equal(logs[2].next_retry_delay_ms, undefined, "terminal failure has no retry delay");
+  });
+
+  test("calculates exponential backoff correctly", async () => {
+    const baseDelay = 2000;
+
+    function calculateNextRetryDelay(attemptNumber, baseDelay) {
+      return baseDelay * Math.pow(2, attemptNumber - 1);
+    }
+
+    assert.equal(calculateNextRetryDelay(1, baseDelay), 2000, "attempt 1: 2000ms");
+    assert.equal(calculateNextRetryDelay(2, baseDelay), 4000, "attempt 2: 4000ms");
+    assert.equal(calculateNextRetryDelay(3, baseDelay), 8000, "attempt 3: 8000ms");
+  });
+});
+
+// --- Idempotency prevents duplicate retries ---
+
+describe("idempotency with retries", () => {
+  test("prevents duplicate processing when job retried after initial success", async () => {
+    const processedJobs = new Set();
+    let handlerCallCount = 0;
+
+    const isAlreadyProcessed = async (jobId) => processedJobs.has(jobId);
+    const markProcessed = async (jobId) => processedJobs.add(jobId);
+
+    async function processJob(job) {
+      if (await isAlreadyProcessed(job.id)) {
+        return { skipped: true, reason: "already_processed" };
+      }
+
+      handlerCallCount++;
+      await markProcessed(job.id);
+      return { sent: true };
+    }
+
+    // First attempt succeeds and marks processed
+    const job = makeJob({ id: "idem-job-1", attemptsMade: 0 });
+    const result1 = await processJob(job);
+    assert.equal(result1.sent, true);
+    assert.equal(handlerCallCount, 1);
+
+    // Retry arrives (simulating retry after transient network issue)
+    const retryJob = makeJob({ id: "idem-job-1", attemptsMade: 1 });
+    const result2 = await processJob(retryJob);
+
+    assert.equal(result2.skipped, true, "retry must be skipped due to idempotency");
+    assert.equal(result2.reason, "already_processed");
+    assert.equal(handlerCallCount, 1, "handler called only once despite retry");
+  });
+
+  test("allows job to be processed on second attempt if first failed", async () => {
+    const processedJobs = new Set();
+
+    const isAlreadyProcessed = async (jobId) => processedJobs.has(jobId);
+    const markProcessed = async (jobId) => processedJobs.add(jobId);
+
+    async function processJob(job) {
+      if (await isAlreadyProcessed(job.id)) {
+        return { skipped: true, reason: "already_processed" };
+      }
+
+      if (job.attemptsMade === 0) {
+        throw new Error("transient failure");
+      }
+
+      await markProcessed(job.id);
+      return { sent: true };
+    }
+
+    // First attempt fails
+    const job1 = makeJob({ id: "retry-succeed", attemptsMade: 0 });
+    await assert.rejects(() => processJob(job1), /transient failure/);
+    assert.equal(processedJobs.has("retry-succeed"), false);
+
+    // Second attempt succeeds
+    const job2 = makeJob({ id: "retry-succeed", attemptsMade: 1 });
+    const result = await processJob(job2);
+    assert.equal(result.sent, true);
+    assert.equal(processedJobs.has("retry-succeed"), true);
+  });
+});

@@ -24,22 +24,27 @@ worker.on("completed", (job) => {
 
 worker.on("failed", (job, err) => {
   const maxAttempts = job?.opts?.attempts ?? 3;
-  const isTerminal = (job?.attemptsMade ?? 0) >= maxAttempts;
+  const attempt = job?.attemptsMade ?? 0;
+  const isTerminal = attempt >= maxAttempts;
+  const backoffDelay = job?.opts?.backoff?.delay ?? 2000;
 
-  if (isTerminal) {
-    console.error(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        event: "notification_failed_terminal",
-        job_id: job?.id,
-        reason: err.message,
-        attempt: job?.attemptsMade,
-      })
-    );
-  } else {
-    console.error(`[worker] job ${job?.id} failed (attempt ${job?.attemptsMade}/${maxAttempts}):`, err.message);
+  // Log all failures with structured format
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    level: "error",
+    event: isTerminal ? "notification_failed_terminal" : "notification_failed",
+    job_id: job?.id,
+    reason: err.message,
+    attempt,
+    max_attempts: maxAttempts,
+  };
+
+  // Add retry delay for non-terminal failures
+  if (!isTerminal && backoffDelay) {
+    logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, attempt - 1);
   }
+
+  console.error(JSON.stringify(logEntry));
 });
 
 worker.on("error", (err) => {
