@@ -4,6 +4,7 @@ import { Worker } from "bullmq";
 import config from "./src/config.js";
 import { getSharedConnection, closeConnection } from "./src/connection.js";
 import { processJob, registry, NotificationHandler } from "./processor.js";
+import { moveToDeadLetter } from "./src/dlq.js";
 
 // Register handlers
 const notificationHandler = new NotificationHandler();
@@ -45,6 +46,21 @@ worker.on("failed", (job, err) => {
   }
 
   console.error(JSON.stringify(logEntry));
+
+  // Move poisoned jobs to DLQ after retry exhaustion
+  if (isTerminal) {
+    moveToDeadLetter(job, err).catch((dlqErr) => {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          event: "dlq_move_failed",
+          job_id: job?.id,
+          reason: dlqErr.message,
+        })
+      );
+    });
+  }
 });
 
 worker.on("error", (err) => {

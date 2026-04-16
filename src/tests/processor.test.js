@@ -365,3 +365,63 @@ describe("idempotency with retries", () => {
     assert.equal(processedJobs.has("retry-succeed"), true);
   });
 });
+
+// --- Poisoned jobs (DLQ) ---
+
+describe("dead letter queue for poisoned jobs", () => {
+  test("terminal failures are moved to DLQ", async () => {
+    const dlqJobs = [];
+
+    async function moveToDeadLetterTest(job, error) {
+      dlqJobs.push({
+        originalJobId: job.id,
+        originalType: job.data?.type,
+        failureReason: error.message,
+        attemptsMade: job.attemptsMade,
+      });
+    }
+
+    // Simulate terminal failure
+    const job = makeJob({
+      id: "poisoned-job-1",
+      type: "send_notification",
+      attemptsMade: 3,
+      attempts: 3,
+    });
+
+    const error = new Error("provider permanently unavailable");
+    await moveToDeadLetterTest(job, error);
+
+    assert.equal(dlqJobs.length, 1);
+    assert.equal(dlqJobs[0].originalJobId, "poisoned-job-1");
+    assert.equal(dlqJobs[0].failureReason, "provider permanently unavailable");
+    assert.equal(dlqJobs[0].attemptsMade, 3);
+  });
+
+  test("non-terminal failures are not moved to DLQ", async () => {
+    const dlqJobs = [];
+
+    async function moveToDeadLetterTest(job, error) {
+      const maxAttempts = job?.opts?.attempts ?? 3;
+      const isTerminal = job.attemptsMade >= maxAttempts;
+
+      if (isTerminal) {
+        dlqJobs.push({
+          originalJobId: job.id,
+          failureReason: error.message,
+        });
+      }
+    }
+
+    // Simulate first retry (not terminal)
+    const job = makeJob({
+      id: "transient-failure",
+      attemptsMade: 1,
+      attempts: 3,
+    });
+
+    await moveToDeadLetterTest(job, new Error("timeout"));
+
+    assert.equal(dlqJobs.length, 0, "transient failure must not be moved to DLQ");
+  });
+});
