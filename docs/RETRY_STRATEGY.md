@@ -11,7 +11,22 @@ This document describes how the notification worker handles failures, retries, a
 - **Backoff type**: Exponential
 - **Initial delay**: 2000ms (configurable via `JOB_BACKOFF_DELAY` env var)
 
+
 ### Backoff Calculation
+
+Each retry attempt uses exponential backoff, where the delay is calculated based on the attempt number:
+
+```
+delay = base_delay * 2^(attempt - 1)
+
+Attempt 1 (first try) → failure → wait 2000ms before retry
+Attempt 2 (first retry) → failure → wait 4000ms before retry
+Attempt 3 (second retry) → failure → wait 8000ms before retry
+Attempt 4 (third retry) → terminal (no more retries)
+```
+
+**Note**: `JOB_ATTEMPTS` (default: 4) includes the initial attempt plus retries. The sequence above shows 3 retries with delays of 2s, 4s, and 8s respectively.
+
 Each retry attempt uses exponential backoff:
 ```
 delay = base_delay * 2^(attempt - 1)
