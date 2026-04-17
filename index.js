@@ -33,7 +33,7 @@ worker.on("failed", (job, err) => {
   const logEntry = {
     timestamp: new Date().toISOString(),
     level: "error",
-    event: isTerminal ? "notification_failed_terminal" : "notification_failed",
+    event: isTerminal ? "job_failed_terminal" : "job_failed",
     job_id: job?.id,
     reason: err.message,
     attempt,
@@ -45,7 +45,9 @@ worker.on("failed", (job, err) => {
     const backoffType =
       job?.opts?.backoff?.type ?? config.queue.backoff?.type ?? "exponential";
     if (backoffType === "exponential") {
-      logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, attempt - 1);
+      // Guard against attempt < 1 to prevent fractional delays
+      // attempt is 1-indexed for calculation: 1st failure gets 2^0 = 1x delay
+      logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, Math.max(0, attempt - 1));
     } else if (backoffType === "fixed") {
       logEntry.next_retry_delay_ms = backoffDelay;
     }
