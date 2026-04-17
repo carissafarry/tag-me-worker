@@ -42,12 +42,6 @@ export async function processJob(job) {
     return result;
   } catch (error) {
     await handler.onFailure(job, error);
-    log.error("job processing failed", {
-      event: "notification_failed",
-      job_id: job.id,
-      type,
-      reason: error.message,
-    });
     throw error;
   }
 }

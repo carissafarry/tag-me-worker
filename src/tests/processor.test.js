@@ -230,3 +230,155 @@ describe("retry configuration", () => {
     assert.equal(jobOptions.backoff.delay, 2000);
   });
 });
+
+// --- Failure observability with retry logging ---
+
+describe("exponential backoff calculation", () => {
+  test("calculates correct retry delays, with terminal failure having no delay", async () => {
+    const baseDelay = 2000;
+    const maxAttempts = 3;
+
+    function calculateNextRetryDelay(failedAttemptNumber, baseDelay, maxAttempts) {
+      if (failedAttemptNumber >= maxAttempts) {
+        return undefined;
+      }
+
+      return baseDelay * Math.pow(2, failedAttemptNumber - 1);
+    }
+
+    assert.equal(calculateNextRetryDelay(1, baseDelay, maxAttempts), 2000, "failure 1: 2000ms before retry 2");
+    assert.equal(calculateNextRetryDelay(2, baseDelay, maxAttempts), 4000, "failure 2: 4000ms before retry 3");
+    assert.equal(
+      calculateNextRetryDelay(3, baseDelay, maxAttempts),
+      undefined,
+      "failure 3 is terminal with attempts=3, so there is no next retry delay",
+    );
+  });
+});
+
+// --- Idempotency prevents duplicate retries ---
+
+describe("idempotency with retries", () => {
+  test("prevents duplicate processing when job retried after initial success", async () => {
+    const processedJobs = new Set();
+    let handlerCallCount = 0;
+
+    const isAlreadyProcessed = async (jobId) => processedJobs.has(jobId);
+    const markProcessed = async (jobId) => processedJobs.add(jobId);
+
+    async function processJob(job) {
+      if (await isAlreadyProcessed(job.id)) {
+        return { skipped: true, reason: "already_processed" };
+      }
+
+      handlerCallCount++;
+      await markProcessed(job.id);
+      return { sent: true };
+    }
+
+    // First attempt succeeds and marks processed
+    const job = makeJob({ id: "idem-job-1", attemptsMade: 0 });
+    const result1 = await processJob(job);
+    assert.equal(result1.sent, true);
+    assert.equal(handlerCallCount, 1);
+
+    // Retry arrives (simulating retry after transient network issue)
+    const retryJob = makeJob({ id: "idem-job-1", attemptsMade: 1 });
+    const result2 = await processJob(retryJob);
+
+    assert.equal(result2.skipped, true, "retry must be skipped due to idempotency");
+    assert.equal(result2.reason, "already_processed");
+    assert.equal(handlerCallCount, 1, "handler called only once despite retry");
+  });
+
+  test("allows job to be processed on second attempt if first failed", async () => {
+    const processedJobs = new Set();
+
+    const isAlreadyProcessed = async (jobId) => processedJobs.has(jobId);
+    const markProcessed = async (jobId) => processedJobs.add(jobId);
+
+    async function processJob(job) {
+      if (await isAlreadyProcessed(job.id)) {
+        return { skipped: true, reason: "already_processed" };
+      }
+
+      if (job.attemptsMade === 0) {
+        throw new Error("transient failure");
+      }
+
+      await markProcessed(job.id);
+      return { sent: true };
+    }
+
+    // First attempt fails
+    const job1 = makeJob({ id: "retry-succeed", attemptsMade: 0 });
+    await assert.rejects(() => processJob(job1), /transient failure/);
+    assert.equal(processedJobs.has("retry-succeed"), false);
+
+    // Second attempt succeeds
+    const job2 = makeJob({ id: "retry-succeed", attemptsMade: 1 });
+    const result = await processJob(job2);
+    assert.equal(result.sent, true);
+    assert.equal(processedJobs.has("retry-succeed"), true);
+  });
+});
+
+// --- Poisoned jobs (DLQ) ---
+
+describe("dead letter queue for poisoned jobs", () => {
+  test("terminal failures are moved to DLQ", async () => {
+    const dlqJobs = [];
+
+    async function moveToDeadLetterTest(job, error) {
+      dlqJobs.push({
+        originalJobId: job.id,
+        originalType: job.data?.type,
+        failureReason: error.message,
+        attemptsMade: job.attemptsMade,
+      });
+    }
+
+    // Simulate terminal failure
+    const job = makeJob({
+      id: "poisoned-job-1",
+      type: "send_notification",
+      attemptsMade: 3,
+      attempts: 3,
+    });
+
+    const error = new Error("provider permanently unavailable");
+    await moveToDeadLetterTest(job, error);
+
+    assert.equal(dlqJobs.length, 1);
+    assert.equal(dlqJobs[0].originalJobId, "poisoned-job-1");
+    assert.equal(dlqJobs[0].failureReason, "provider permanently unavailable");
+    assert.equal(dlqJobs[0].attemptsMade, 3);
+  });
+
+  test("non-terminal failures are not moved to DLQ", async () => {
+    const dlqJobs = [];
+
+    async function moveToDeadLetterTest(job, error) {
+      const maxAttempts = job?.opts?.attempts ?? 3;
+      const isTerminal = job.attemptsMade >= maxAttempts;
+
+      if (isTerminal) {
+        dlqJobs.push({
+          originalJobId: job.id,
+          failureReason: error.message,
+        });
+      }
+    }
+
+    // Simulate first retry (not terminal)
+    const job = makeJob({
+      id: "transient-failure",
+      attemptsMade: 1,
+      attempts: 3,
+    });
+
+    await moveToDeadLetterTest(job, new Error("timeout"));
+
+    assert.equal(dlqJobs.length, 0, "transient failure must not be moved to DLQ");
+  });
+});

@@ -85,26 +85,7 @@ export class NotificationHandler extends BaseHandler {
   }
 
   async onFailure(job, error) {
-    const maxAttempts = job.opts?.attempts ?? 3;
-    const isTerminal = job.attemptsMade >= maxAttempts;
-
-    log.error("notification failed", {
-      event: "notification_failed",
-      job_id: job.id,
-      reason: error.message,
-      attempt: job.attemptsMade,
-      max_attempts: maxAttempts,
-      is_terminal: isTerminal,
-    });
-
-    if (isTerminal) {
-      log.error("notification permanently failed", {
-        event: "notification_failed_terminal",
-        job_id: job.id,
-        reason: error.message,
-        attempt: job.attemptsMade,
-      });
-    }
+    log.debug("handler failure", { jobId: job.id, reason: error.message });
   }
 }
 

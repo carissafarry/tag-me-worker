@@ -4,6 +4,7 @@ import { Worker } from "bullmq";
 import config from "./src/config.js";
 import { getSharedConnection, closeConnection } from "./src/connection.js";
 import { processJob, registry, NotificationHandler } from "./processor.js";
+import { moveToDeadLetter } from "./src/dlq.js";
 
 // Register handlers
 const notificationHandler = new NotificationHandler();
@@ -24,21 +25,39 @@ worker.on("completed", (job) => {
 
 worker.on("failed", (job, err) => {
   const maxAttempts = job?.opts?.attempts ?? 3;
-  const isTerminal = (job?.attemptsMade ?? 0) >= maxAttempts;
+  const attempt = Math.max(1, job?.attemptsMade ?? 0);
+  const isTerminal = attempt >= maxAttempts;
+  const backoffDelay = job?.opts?.backoff?.delay ?? 2000;
 
+  // Log all failures with structured format
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    level: "error",
+    event: isTerminal ? "job_failed_terminal" : "job_failed",
+    job_id: job?.id,
+    reason: err.message,
+    attempt,
+    max_attempts: maxAttempts,
+  };
+
+  // Add retry delay for non-terminal failures
+  if (!isTerminal && backoffDelay) {
+    const backoffType =
+      job?.opts?.backoff?.type ?? config.queue.backoff?.type ?? "exponential";
+    if (backoffType === "exponential") {
+      // Guard against attempt < 1 to prevent fractional delays
+      // attempt is 1-indexed for calculation: 1st failure gets 2^0 = 1x delay
+      logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, Math.max(0, attempt - 1));
+    } else if (backoffType === "fixed") {
+      logEntry.next_retry_delay_ms = backoffDelay;
+    }
+  }
+
+  console.error(JSON.stringify(logEntry));
+
+  // Move poisoned jobs to DLQ after retry exhaustion
   if (isTerminal) {
-    console.error(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        event: "notification_failed_terminal",
-        job_id: job?.id,
-        reason: err.message,
-        attempt: job?.attemptsMade,
-      })
-    );
-  } else {
-    console.error(`[worker] job ${job?.id} failed (attempt ${job?.attemptsMade}/${maxAttempts}):`, err.message);
+    moveToDeadLetter(job, err);
   }
 });
 
