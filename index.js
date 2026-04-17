@@ -49,17 +49,7 @@ worker.on("failed", (job, err) => {
 
   // Move poisoned jobs to DLQ after retry exhaustion
   if (isTerminal) {
-    moveToDeadLetter(job, err).catch((dlqErr) => {
-      console.error(
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          level: "error",
-          event: "dlq_move_failed",
-          job_id: job?.id,
-          reason: dlqErr.message,
-        })
-      );
-    });
+    moveToDeadLetter(job, err);
   }
 });
 

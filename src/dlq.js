@@ -13,7 +13,8 @@ const dlqName = `${config.worker.queueName}:dlq`;
 
 /**
  * Dead Letter Queue for jobs that exhausted retries
- * BullMQ will automatically move failed jobs here after max attempts
+ * Jobs are enqueued here explicitly by application code, typically via  
+ * `moveToDeadLetter`, when a job reaches terminal failure. 
  */
 export const deadLetterQueue = new Queue(dlqName, { connection });
 
@@ -37,7 +38,7 @@ export async function moveToDeadLetter(job, error) {
       },
       {
         priority: 1,
-        removeOnComplete: false,
+        removeOnComplete: { count: 10000 },
       }
     );
 
