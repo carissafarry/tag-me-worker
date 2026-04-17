@@ -87,15 +87,22 @@ export class NotificationHandler extends BaseHandler {
   async onFailure(job, error) {
     const maxAttempts = job.opts?.attempts ?? 3;
     const isTerminal = job.attemptsMade >= maxAttempts;
+    const backoffDelay = job.opts?.backoff?.delay ?? 2000;
 
-    log.error("notification failed", {
+    const failureLog = {
       event: "notification_failed",
       job_id: job.id,
       reason: error.message,
       attempt: job.attemptsMade,
       max_attempts: maxAttempts,
-      is_terminal: isTerminal,
-    });
+    };
+
+    // Add next retry delay for non-terminal failures
+    if (!isTerminal) {
+      failureLog.next_retry_delay_ms = backoffDelay * Math.pow(2, job.attemptsMade - 1);
+    }
+
+    log.error("notification failed", failureLog);
 
     if (isTerminal) {
       log.error("notification permanently failed", {
