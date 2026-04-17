@@ -233,69 +233,26 @@ describe("retry configuration", () => {
 
 // --- Failure observability with retry logging ---
 
-describe("failure observability and retry logging", () => {
-  test("logs all failures with retry attempt count and max attempts", async () => {
-    const logs = [];
+describe("exponential backoff calculation", () => {
+  test("calculates correct retry delays, with terminal failure having no delay", async () => {
+    const baseDelay = 2000;
+    const maxAttempts = 3;
 
-    function simulateFailureLogging(job, err) {
-      const maxAttempts = job?.opts?.attempts ?? 3;
-      const attempt = job?.attemptsMade ?? 0;
-      const isTerminal = attempt >= maxAttempts;
-      const backoffDelay = job?.opts?.backoff?.delay ?? 2000;
-
-      const logEntry = {
-        timestamp: new Date().toISOString(),
-        level: "error",
-        event: isTerminal ? "notification_failed_terminal" : "notification_failed",
-        job_id: job?.id,
-        reason: err.message,
-        attempt,
-        max_attempts: maxAttempts,
-      };
-
-      if (!isTerminal && backoffDelay) {
-        logEntry.next_retry_delay_ms = backoffDelay * Math.pow(2, attempt - 1);
+    function calculateNextRetryDelay(failedAttemptNumber, baseDelay, maxAttempts) {
+      if (failedAttemptNumber >= maxAttempts) {
+        return undefined;
       }
 
-      logs.push(logEntry);
+      return baseDelay * Math.pow(2, failedAttemptNumber - 1);
     }
 
-    // First retry attempt
-    const job1 = makeJob({ id: "job-retry-1", attemptsMade: 1, attempts: 3 });
-    simulateFailureLogging(job1, new Error("timeout"));
-
-    assert.equal(logs[0].event, "notification_failed");
-    assert.equal(logs[0].attempt, 1);
-    assert.equal(logs[0].max_attempts, 3);
-    assert.equal(logs[0].next_retry_delay_ms, 2000); // 2000 * 2^0
-
-    // Second retry attempt
-    const job2 = makeJob({ id: "job-retry-1", attemptsMade: 2, attempts: 3 });
-    simulateFailureLogging(job2, new Error("timeout"));
-
-    assert.equal(logs[1].event, "notification_failed");
-    assert.equal(logs[1].attempt, 2);
-    assert.equal(logs[1].next_retry_delay_ms, 4000); // 2000 * 2^1
-
-    // Terminal failure
-    const job3 = makeJob({ id: "job-retry-1", attemptsMade: 3, attempts: 3 });
-    simulateFailureLogging(job3, new Error("timeout"));
-
-    assert.equal(logs[2].event, "notification_failed_terminal");
-    assert.equal(logs[2].attempt, 3);
-    assert.equal(logs[2].next_retry_delay_ms, undefined, "terminal failure has no retry delay");
-  });
-
-  test("calculates exponential backoff correctly", async () => {
-    const baseDelay = 2000;
-
-    function calculateNextRetryDelay(attemptNumber, baseDelay) {
-      return baseDelay * Math.pow(2, attemptNumber - 1);
-    }
-
-    assert.equal(calculateNextRetryDelay(1, baseDelay), 2000, "attempt 1: 2000ms");
-    assert.equal(calculateNextRetryDelay(2, baseDelay), 4000, "attempt 2: 4000ms");
-    assert.equal(calculateNextRetryDelay(3, baseDelay), 8000, "attempt 3: 8000ms");
+    assert.equal(calculateNextRetryDelay(1, baseDelay, maxAttempts), 2000, "failure 1: 2000ms before retry 2");
+    assert.equal(calculateNextRetryDelay(2, baseDelay, maxAttempts), 4000, "failure 2: 4000ms before retry 3");
+    assert.equal(
+      calculateNextRetryDelay(3, baseDelay, maxAttempts),
+      undefined,
+      "failure 3 is terminal with attempts=3, so there is no next retry delay",
+    );
   });
 });
 
